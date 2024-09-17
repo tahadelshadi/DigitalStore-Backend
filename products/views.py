@@ -1,51 +1,81 @@
+
 import json
 from django.db.models import Case, When, IntegerField
+from rest_framework import generics
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny, IsAdminUser
-from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import OrderingFilter
-from rest_framework import generics
+from django_filters.rest_framework import DjangoFilterBackend
 from django.shortcuts import get_object_or_404
 from .serializers import ProductSerializer, CategorySerializer
 from .models import Product, Category
 
+
+class RecommendedProduct(APIView):
+    permission_classes = [AllowAny]
+    filter_backends = [DjangoFilterBackend]
+    filteset_fields = ["price", "stock"]
+
+    def get(self, request):
+        # category = get_object_or_404(Category, name=category_name)
+        # products_list = Product.objects.filter(category=category)
+        products = Product.objects.filter(rate__gt=4)
+        serializer = ProductSerializer(products, many=True)
+        return Response(serializer.data)
+
+
 class ProductsList(generics.ListAPIView):
     permission_classes = [AllowAny]
     serializer_class = ProductSerializer
-    filter_backends = [
-        DjangoFilterBackend,
-        OrderingFilter,
-    ]
-    filterset_fields = [
-        "category",
-        "stock",
-    ]
+    filter_backends = [DjangoFilterBackend, OrderingFilter]
+    filterset_fields = ["stock"]
     ordering_fields = ["price"]
 
     def get_queryset(self):
-        queryset = Product.objects.all()
-        queryset = queryset.annotate(
+        queryset = self._get_base_queryset()
+
+        # Filter by category name
+        category_name = self.request.query_params.get("category")
+        if category_name:
+            queryset = self._filter_by_category(queryset, category_name)
+
+        # Filter by price range
+        min_price = self.request.query_params.get("minPrice")
+        max_price = self.request.query_params.get("maxPrice")
+        queryset = self._filter_by_price(queryset, min_price, max_price)
+
+        # Apply ordering with custom stock priority
+        ordering = self.request.query_params.get("ordering")
+        return self._apply_ordering(queryset, ordering)
+
+    def _get_base_queryset(self):
+        """Base queryset with 'in_stock' annotation."""
+        return Product.objects.annotate(
             in_stock=Case(
-                When(stock__gt=0, then=1),
-                default=0,
-                output_field=IntegerField(),
+                When(stock__gt=0, then=1), default=0, output_field=IntegerField()
             )
         )
-        min_price = self.request.query_params.get("minPrice", None)
-        max_price = self.request.query_params.get("maxPrice", None)
-        if min_price is not None:
-            queryset = queryset.filter(price__gte=min_price)
 
-        if max_price is not None:
+    def _filter_by_category(self, queryset, category_name):
+        """Filter products by category name."""
+        category = get_object_or_404(Category, name__iexact=category_name)
+        return queryset.filter(category=category)
+
+    def _filter_by_price(self, queryset, min_price, max_price):
+        """Filter products by min and max price range."""
+        if min_price:
+            queryset = queryset.filter(price__gte=min_price)
+        if max_price:
             queryset = queryset.filter(price__lte=max_price)
-            
-        ordering = self.request.query_params.get("ordering", None)
+        return queryset
+
+    def _apply_ordering(self, queryset, ordering):
+        """Apply ordering with 'in_stock' priority."""
         if ordering:
             return queryset.order_by("-in_stock", *ordering.split(","))
-        else:
-            return queryset.order_by("-in_stock")
+        return queryset.order_by("-in_stock")
 
 
 class ProductDetail(APIView):
